@@ -7,6 +7,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
+using System.Text;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
@@ -18,32 +19,42 @@ namespace RevokeMsgPatcher
         private AppModifier modifier = null;
 
         private WechatModifier wechatModifier = null;
+        private WeixinModifier weixinModifier = null;
         private QQModifier qqModifier = null;
         private TIMModifier timModifier = null;
         private QQLiteModifier qqLiteModifier = null;
+        private QQNTModifier qqntModifier = null;
 
         private string thisVersion;
         private bool needUpdate = false;
-        private string getPatchJsonStatus = "GETTING";  // GETTING FAIL SUCCESS
+        private string getPatchJsonStatus = "GETTING"; // GETTING FAIL SUCCESS
 
         private readonly GAHelper ga = GAHelper.Instance; // Google Analytics 记录
+
+        Bag bag = null;
+
+        FormLiteLoaderQQNT formLiteLoader = null;
 
         public void InitModifier()
         {
             // 从配置文件中读取配置
             JavaScriptSerializer serializer = new JavaScriptSerializer();
-            Bag bag = serializer.Deserialize<Bag>(Properties.Resources.PatchJson);
+            bag = serializer.Deserialize<Bag>(Properties.Resources.PatchJson);
 
             // 初始化每个应用对应的修改者
             wechatModifier = new WechatModifier(bag.Apps["Wechat"]);
+            weixinModifier = new WeixinModifier(bag.Apps["Weixin"]);
             qqModifier = new QQModifier(bag.Apps["QQ"]);
             timModifier = new TIMModifier(bag.Apps["TIM"]);
             qqLiteModifier = new QQLiteModifier(bag.Apps["QQLite"]);
+            qqntModifier = new QQNTModifier(bag.Apps["QQNT"]);
 
             rbtWechat.Tag = wechatModifier;
+            rbtWeixin.Tag = weixinModifier;
             rbtQQ.Tag = qqModifier;
             rbtTIM.Tag = timModifier;
             rbtQQLite.Tag = qqLiteModifier;
+            rbtQQNT.Tag = qqntModifier;
 
             // 默认微信
             rbtWechat.Enabled = true;
@@ -61,6 +72,7 @@ namespace RevokeMsgPatcher
                 thisVersion = currentVersion.Substring(0, 3);
                 currentVersion = " v" + thisVersion;
             }
+
             this.Text += currentVersion;
 
             InitModifier();
@@ -74,7 +86,7 @@ namespace RevokeMsgPatcher
             // 自动获取应用安装路径
             txtPath.Text = modifier.FindInstallPath();
             // 显示是否能够备份还原、版本和功能
-            InitEditorsAndUI(txtPath.Text);
+            //InitEditorsAndUI(txtPath.Text);
         }
 
         private void InitEditorsAndUI(string path)
@@ -88,7 +100,13 @@ namespace RevokeMsgPatcher
                 panelCategories.Controls.Clear();
 
                 // 重新计算并修改界面元素
-                modifier.InitEditors(path);
+                bool hasEditors = modifier.InitEditors(path);
+                if (!hasEditors)
+                {
+                    btnPatch.Enabled = false;
+                    return;
+                }
+
                 modifier.SetVersionLabelAndCategoryCategories(lblVersion, panelCategories);
 
                 EnableAllButton(true);
@@ -132,16 +150,49 @@ namespace RevokeMsgPatcher
 
             EnableAllButton(false);
             // a.重新初始化编辑器
-            modifier.InitEditors(txtPath.Text);
-            // b.获取选择的功能 （精准匹配返回null） // TODO 此处逻辑可以优化 不可完全信任UI信息
-            List<string> categories = UIController.GetCategoriesFromPanel(panelCategories);
-            if (categories != null && categories.Count == 0)
+            bool hasEditors = modifier.InitEditors(txtPath.Text);
+            if (!hasEditors)
             {
-                MessageBox.Show("请至少选择一项功能");
-                EnableAllButton(true);
-                btnRestore.Enabled = modifier.BackupExists();
+                btnPatch.Enabled = false;
                 return;
             }
+
+            // b.获取选择的功能 （精准匹配返回null） // TODO 此处逻辑可以优化 不可完全信任UI信息
+            List<string> categories = UIController.GetCategoriesFromPanel(panelCategories);
+
+            // DealiAxy: 修复一个空指针异常的逻辑错误
+            if (categories != null)
+            {
+                if (categories.Count == 0)
+                {
+                    MessageBox.Show("请至少选择一项功能");
+                    EnableAllButton(true);
+                    btnRestore.Enabled = modifier.BackupExists();
+                    return;
+                }
+
+                // 20220806 偷懒的特殊逻辑，用于提示用户选择对防撤回功能进行二选一
+                if (categories.Contains("防撤回(老)") && categories.Contains("防撤回带提示(新)"))
+                {
+                    DialogResult result = MessageBox.Show(@"防撤回(老) 和 防撤回带提示(新) 两个功能二选一即可！
+
+1. 防撤回(老) 没有提示，新版本会出现撤回自己消息不断转圈的情况(实际撤回成功)；
+
+2. 防撤回带提示(新) 有撤回提示 但是存在以下问题：
+    a. 如果正在和对方聊天时，对方撤回了消息，那撤回提示依然不会显示，只有在左侧预览窗有显示撤回，需要切换到和别人的聊天窗再切回来才能看到撤回提示，如果是把聊天拉出单独窗口，一直不会有撤回提示。
+    b. 视频/图片消息撤回后会被删除，无法查看
+    c. 部分历史消息无法防撤回；
+
+点击确定继续，点击取消重新选择！", "功能选择提示", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+                    if (result != DialogResult.Yes)
+                    {
+                        EnableAllButton(true);
+                        btnRestore.Enabled = modifier.BackupExists();
+                        return;
+                    }
+                }
+            }
+
             // c.计算SHA1，验证文件完整性，寻找对应的补丁信息（精确版本、通用特征码两种补丁信息）
             try
             {
@@ -177,8 +228,7 @@ namespace RevokeMsgPatcher
             {
                 modifier.Patch();
                 ga.RequestPageView($"{enName}/{version}/patch/succ", "补丁安装成功");
-                MessageBox.Show("补丁安装成功！");
-
+                MessageBox.Show("补丁安装成功！", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             catch (BusinessException ex)
             {
@@ -196,7 +246,6 @@ namespace RevokeMsgPatcher
             {
                 InitEditorsAndUI(txtPath.Text);
             }
-
         }
 
         private void txtPath_TextChanged(object sender, EventArgs e)
@@ -238,7 +287,16 @@ namespace RevokeMsgPatcher
             EnableAllButton(false);
             try
             {
-                bool succ = modifier.Restore();
+                bool succ;
+                if (rbtQQNT.Checked)
+                {
+                    succ = qqntModifier.Restore();
+                }
+                else
+                {
+                    succ = modifier.Restore();
+                }
+
                 if (succ)
                 {
                     MessageBox.Show("还原成功！");
@@ -249,6 +307,7 @@ namespace RevokeMsgPatcher
                 Console.WriteLine(ex.Message);
                 MessageBox.Show(ex.Message);
             }
+
             EnableAllButton(true);
             // 重新计算显示是否能够备份还原、版本和功能
             InitEditorsAndUI(txtPath.Text);
@@ -261,6 +320,7 @@ namespace RevokeMsgPatcher
 
         private async void FormMain_Load(object sender, EventArgs e)
         {
+            InitNoticeControls(bag);
             // 异步获取最新的补丁信息
             string json = await HttpUtil.GetPatchJsonAsync();
             //string json = null; // local test
@@ -275,27 +335,38 @@ namespace RevokeMsgPatcher
                 try
                 {
                     JavaScriptSerializer serializer = new JavaScriptSerializer();
-                    Bag bag = serializer.Deserialize<Bag>(json);
+                    Bag newBag = serializer.Deserialize<Bag>(json);
 
-                    wechatModifier.Config = bag.Apps["Wechat"];
-                    qqModifier.Config = bag.Apps["QQ"];
-                    timModifier.Config = bag.Apps["TIM"];
-                    qqLiteModifier.Config = bag.Apps["QQLite"];
-
-                    if (Convert.ToDecimal(bag.LatestVersion) > Convert.ToDecimal(thisVersion))
+                    if (Convert.ToDecimal(newBag.LatestVersion) > Convert.ToDecimal(thisVersion))
                     {
                         needUpdate = true;
-                        lblUpdatePachJson.Text = $"[ 存在最新版本 {bag.LatestVersion} ]";
+                        lblUpdatePachJson.Text = $"[ 存在最新版本 {newBag.LatestVersion} ]";
                         lblUpdatePachJson.ForeColor = Color.Red;
                     }
-                    else
+                    else if (bag.PatchVersion == 0 || newBag.PatchVersion > bag.PatchVersion)
                     {
                         needUpdate = false;
                         lblUpdatePachJson.Text = "[ 获取成功，点击查看更多信息 ]";
                         lblUpdatePachJson.ForeColor = Color.RoyalBlue;
+
+                        wechatModifier.Config = newBag.Apps["Wechat"];
+                        weixinModifier.Config = newBag.Apps["Weixin"];
+                        qqModifier.Config = newBag.Apps["QQ"];
+                        timModifier.Config = newBag.Apps["TIM"];
+                        qqLiteModifier.Config = newBag.Apps["QQLite"];
+
+                        getPatchJsonStatus = "SUCCESS";
+                        bag = newBag;
+                        InitControls();
+                        InitNoticeControls(newBag);
+                        InitEditorsAndUI(txtPath.Text);
                     }
-                    getPatchJsonStatus = "SUCCESS";
-                    InitControls();
+                    else if (newBag.PatchVersion <= bag.PatchVersion)
+                    {
+                        needUpdate = false;
+                        lblUpdatePachJson.Text = "[ 软件内置补丁信息已经是最新 ]";
+                        lblUpdatePachJson.ForeColor = Color.RoyalBlue;
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -314,8 +385,11 @@ namespace RevokeMsgPatcher
             {
                 tips += "【当前存在最新版本，点击确定进入软件主页下载最新版本。】" + Environment.NewLine + Environment.NewLine;
             }
+
             tips += "支持以下版本" + Environment.NewLine;
             tips += " ➯ 微信：" + wechatModifier.Config.GetSupportVersionStr() + Environment.NewLine;
+            tips += " ➯ 微信4.0：" + weixinModifier.Config.GetSupportVersionStr() + Environment.NewLine;
+            tips += " ➯ QQNT：" + qqntModifier.Config.GetSupportVersionStr() + Environment.NewLine;
             tips += " ➯ QQ：" + qqModifier.Config.GetSupportVersionStr() + Environment.NewLine;
             tips += " ➯ QQ轻聊版：" + qqLiteModifier.Config.GetSupportVersionStr() + Environment.NewLine;
             tips += " ➯ TIM：" + timModifier.Config.GetSupportVersionStr() + Environment.NewLine;
@@ -329,12 +403,22 @@ namespace RevokeMsgPatcher
 
         private void radioButtons_CheckedChanged(object sender, EventArgs e)
         {
-            EnableAllButton(false);
             RadioButton radioButton = sender as RadioButton;
+            if (!radioButton.Checked)
+            {
+                return;
+            }
+
+            EnableAllButton(false);
+
             // 切换使用不同的防撤回对象
             if (rbtWechat.Checked)
             {
                 modifier = (WechatModifier)rbtWechat.Tag;
+            }
+            else if (rbtWeixin.Checked)
+            {
+                modifier = (WeixinModifier)rbtWeixin.Tag;
             }
             else if (rbtQQ.Checked)
             {
@@ -348,12 +432,36 @@ namespace RevokeMsgPatcher
             {
                 modifier = (QQLiteModifier)rbtQQLite.Tag;
             }
-            txtPath.Text = modifier.FindInstallPath();
-            EnableAllButton(true);
+            else if (rbtQQNT.Checked)
+            {
+                modifier = (QQNTModifier)rbtQQNT.Tag;
+                ShowOrFocusFormLiteLoaderQQNT();
+            }
 
-            // 重新计算显示是否能够备份还原、版本和功能
-            InitEditorsAndUI(txtPath.Text);
+            EnableAllButton(true);
+            // 触发了 txtPath_TextChanged 方法 已经调用了 InitEditorsAndUI(txtPath.Text);
+            // 也就是说 重新计算显示是否能够备份还原、版本和功能
+            txtPath.Text = modifier.FindInstallPath();
+
             ga.RequestPageView($"{GetCheckedRadioButtonNameEn()}/{lblVersion.Text}/switch", "切换标签页");
+        }
+
+        private void ShowOrFocusFormLiteLoaderQQNT()
+        {
+            if (formLiteLoader == null || formLiteLoader.IsDisposed)
+            {
+                formLiteLoader = new FormLiteLoaderQQNT();
+                formLiteLoader.Show();
+            }
+            else
+            {
+                if (formLiteLoader.WindowState == FormWindowState.Minimized)
+                {
+                    formLiteLoader.WindowState = FormWindowState.Normal;
+                }
+                formLiteLoader.BringToFront();
+                formLiteLoader.Focus();
+            }
         }
 
         private string GetCheckedRadioButtonNameEn()
@@ -374,6 +482,11 @@ namespace RevokeMsgPatcher
             {
                 return "qqlite";
             }
+            else if (rbtQQNT.Checked)
+            {
+                return "qqnt";
+            }
+
             return "none";
         }
 
@@ -439,11 +552,48 @@ namespace RevokeMsgPatcher
             }
             else
             {
-                DialogResult dr = MessageBox.Show($"未在同级目录下找到“微信通用多开工具”，位置：{path}，点击“确定”访问微信通用多开工具的主页，你可以在主页上下载到这个工具。", "未找到程序", MessageBoxButtons.OKCancel);
+                DialogResult dr = MessageBox.Show($"未在同级目录下找到“微信通用多开工具”，位置：{path}，点击“确定”访问微信通用多开工具的主页，你可以在主页上下载到这个工具。",
+                    "未找到程序", MessageBoxButtons.OKCancel);
                 if (dr == DialogResult.OK)
                 {
-                    Process.Start("https://github.com/huiyadanli/RevokeMsgPatcher/tree/master/RevokeMsgPatcher.MultiInstance");
+                    Process.Start(
+                        "https://github.com/huiyadanli/RevokeMsgPatcher/tree/master/RevokeMsgPatcher.MultiInstance");
                 }
+            }
+        }
+
+        private void InitNoticeControls(Bag b)
+        {
+            labelNotice.Cursor = Cursors.Default;
+            panelNotice.Visible = false;
+            labelNotice.Visible = false;
+            if (b != null && !string.IsNullOrEmpty(b.Notice))
+            {
+                labelNotice.Text = b.Notice;
+                // 一行26个中文字 // TODO 这种计算方式并不精确，而且高dpi缩放问题会导致很多问题
+                int lineNum = (int)Math.Ceiling(Encoding.Default.GetByteCount(b.Notice) / 2 * 1.0 / 26);
+                lineNum = lineNum < 1 ? 1 : lineNum;
+                int height = lineNum * 26;
+                labelNotice.Size = new Size(labelNotice.Size.Width, labelNotice.Size.Height + height);
+                panelNotice.Size = new Size(panelNotice.Size.Width, panelNotice.Size.Height + height);
+                this.Size = new Size(this.Size.Width, this.Size.Height + panelNotice.Size.Height + 20);
+
+                if (!string.IsNullOrEmpty(b.NoticeUrl))
+                {
+                    labelNotice.Cursor = Cursors.Hand;
+                    this.labelNotice.MouseClick += new MouseEventHandler(this.labelNotice_MouseClick);
+                }
+
+                panelNotice.Visible = true;
+                labelNotice.Visible = true;
+            }
+        }
+
+        private void labelNotice_MouseClick(object sender, MouseEventArgs e)
+        {
+            if (bag.NoticeUrl != null && bag.NoticeUrl.ToLower().StartsWith("http"))
+            {
+                Process.Start(bag.NoticeUrl);
             }
         }
     }

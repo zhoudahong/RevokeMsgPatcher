@@ -14,6 +14,14 @@ namespace RevokeMsgPatcher.Modifier
             this.config = config;
         }
 
+        public override void AfterPatchSuccess()
+        {
+        }
+
+        public override void AfterPatchFail()
+        {
+        }
+
         /// <summary>
         /// 自动寻找获取微信安装路径
         /// </summary>
@@ -26,7 +34,7 @@ namespace RevokeMsgPatcher.Modifier
                 string realPath = GetRealInstallPath(installPath);
                 if (string.IsNullOrEmpty(realPath))
                 {
-                    List<string> defaultPathList = PathUtil.GetDefaultInstallPaths(@"Tencent\QQ");
+                    List<string> defaultPathList = PathUtil.GetDefaultInstallPaths(@"Tencent\Wechat");
                     foreach (string defaultPath in defaultPathList)
                     {
                         realPath = GetRealInstallPath(defaultPath);
